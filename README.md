@@ -1,8 +1,8 @@
 # Multi-Agent Travel Planner with BeeAI
 
-Production-ready **multi-agent travel planning** system built on the [BeeAI Framework](https://framework.beeai.dev/). A **Travel Coordinator** orchestrates three specialists via `HandoffTool`, each specialist follows **ReAct** discipline with `ThinkTool` + `ConditionalRequirement`, and failures are handled with **validation, retries, and structured error reports**.
+Production-ready **multi-agent travel planning** system built on the [BeeAI Framework](https://framework.beeai.dev/). A **Travel Coordinator** orchestrates three specialists via `HandoffTool`, each specialist follows **ReAct** discipline with `ThinkTool` + `ConditionalRequirement`, **Human-in-the-Loop (HITL)** gates protect real-world plan accuracy, and failures are handled with **validation, retries, and structured error reports**.
 
-> **Key Points:** multi-agent orchestration · ReAct logics · production error handling
+> **Key Points:** multi-agent orchestration · ReAct logics · HITL for production accuracy · production error handling
 
 ---
 
@@ -10,8 +10,8 @@ Production-ready **multi-agent travel planning** system built on the [BeeAI Fram
 
 1. Orchestrate specialized BeeAI `RequirementAgent`s with `HandoffTool` (coordinator → specialists).
 2. Enforce **ReAct** (Reason → Act → Observe → Answer) using `ThinkTool` and `ConditionalRequirement`.
-3. Gate risky handoffs with `AskPermissionRequirement` when interactive approval is required.
-4. Ship production concerns: env-based config, query validation, retries, logging, CLI, and CI tests.
+3. Apply **HITL** with `AskPermissionRequirement` so a human approves specialist handoffs (and optionally the final plan) — critical for real-world production accuracy.
+4. Ship production concerns: env-based config, query validation, coverage checks, retries, logging, CLI, and CI tests.
 
 ---
 
@@ -25,13 +25,14 @@ Production-ready **multi-agent travel planning** system built on the [BeeAI Fram
 │                      │                 │                                     │
 │                 Settings (.env)        ▼                                     │
 │                               Travel Coordinator (RequirementAgent)          │
-│                               ThinkTool + HandoffTools                       │
+│                               ThinkTool + HandoffTools + HITL gates          │
 │                                      │                                       │
 │              ┌───────────────────────┼───────────────────────┐               │
 │              ▼                       ▼                       ▼               │
 │     Destination Expert      Travel Meteorologist    Language & Culture       │
 │     Wikipedia + Think        OpenMeteo + Think       Wikipedia + Think       │
 │                                                                              │
+│   HITL: approve handoffs → coverage check → optional final plan review       │
 │   Error path: ValidationError → FrameworkError retry → OrchestrationError    │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -47,22 +48,26 @@ flowchart LR
   SVC --> LLM[ChatModel.from_name]
   SVC --> ORCH[TravelAgentSystem]
   ORCH --> COORD[Travel Coordinator]
+  HITL[HITL operator] -.->|approve/deny| COORD
   COORD -->|HandoffTool| DEST[Destination Expert]
   COORD -->|HandoffTool| WX[Travel Meteorologist]
   COORD -->|HandoffTool| LANG[Language & Culture Expert]
   DEST --> WIKI[(Wikipedia)]
   LANG --> WIKI
   WX --> METEO[(Open-Meteo)]
-  COORD --> OUT[Markdown travel plan]
+  COORD --> COV[Coverage check]
+  COV --> HITL2[Optional final review]
+  HITL2 --> OUT[Markdown travel plan]
 ```
 
 ### Multi-agent orchestration
 
-The coordinator never scrapes weather or Wikipedia itself. It **reasons**, then **delegates** through named handoff tools. Specialists return domain answers; the coordinator **synthesizes** a single traveler-facing plan.
+The coordinator never scrapes weather or Wikipedia itself. It **reasons**, then **delegates** through named handoff tools. Specialists return domain answers; the coordinator **synthesizes** a single traveler-facing plan. With HITL enabled, each handoff pauses for human approval so costly or inaccurate specialist calls never run blindly in production.
 
 ```mermaid
 sequenceDiagram
   participant T as Traveler
+  participant H as HITL Operator
   participant C as Travel Coordinator
   participant D as Destination Expert
   participant M as Meteorologist
@@ -70,16 +75,24 @@ sequenceDiagram
 
   T->>C: Trip request (e.g. Japan immersion)
   C->>C: ThinkTool — decompose needs
+  C->>H: AskPermission DestinationResearch
+  H-->>C: allow / deny
   C->>D: Handoff DestinationResearch
   D->>D: Think → Wikipedia → answer
   D-->>C: Landmarks, transport, safety
+  C->>H: AskPermission WeatherPlanning
+  H-->>C: allow / deny
   C->>M: Handoff WeatherPlanning
   M->>M: Think → OpenMeteo → answer
   M-->>C: Forecast + packing tips
+  C->>H: AskPermission LanguageCulturalGuidance
+  H-->>C: allow / deny
   C->>L: Handoff LanguageCulturalGuidance
   L->>L: Think → research → answer
   L-->>C: Phrases + etiquette
   C->>C: Synthesize cohesive plan
+  C->>H: Optional final plan review
+  H-->>C: accept / reject
   C-->>T: Comprehensive travel plan
 ```
 
@@ -87,7 +100,7 @@ sequenceDiagram
 
 | Agent | Role | Tools | Requirements (control plane) |
 | --- | --- | --- | --- |
-| **Travel Coordinator** | Main interface / synthesizer | `ThinkTool`, 3× `HandoffTool` | No consecutive Think; optional `AskPermissionRequirement` on handoffs |
+| **Travel Coordinator** | Main interface / synthesizer | `ThinkTool`, 3× `HandoffTool` | No consecutive Think; **HITL** `AskPermissionRequirement` on handoffs |
 | **Destination Expert** | Attractions, transport, safety | `ThinkTool`, `WikipediaTool` | Think forced at step 1; Wikipedia only after Think |
 | **Travel Meteorologist** | Climate & packing | `ThinkTool`, `OpenMeteoTool` | Think first; OpenMeteo once after Think |
 | **Language & Culture Expert** | Phrases, etiquette, norms | `ThinkTool`, `WikipediaTool` | Think forced at step 1 |
@@ -151,6 +164,48 @@ Documented profiles live in `src/travel_planner/orchestration/react.py` and are 
 
 ---
 
+## Human-in-the-Loop (HITL) for production accuracy
+
+Real travelers feel the cost of a wrong handoff: irrelevant weather, missed cultural norms, or unsafe destination advice. This project treats **HITL as a first-class production control**, not a demo toggle.
+
+| Gate | Mechanism | Why it improves accuracy |
+| --- | --- | --- |
+| **Handoff approval** | BeeAI `AskPermissionRequirement` + audited Rich prompt | Human confirms each specialist call is warranted before it runs |
+| **Coverage check** | Keyword signals for destination / weather / culture | Flags incomplete synthesis before delivery |
+| **Final plan review** | Optional second HITL gate on the synthesized markdown | Operator accepts or rejects the traveler-facing answer |
+| **Audit trail** | `ApprovalAuditLog` on `PlanResult.metadata["hitl"]` | Decisions are logged for debugging and compliance |
+
+```mermaid
+flowchart TD
+  R[Coordinator wants specialist handoff] --> P{HITL AskPermission}
+  P -->|deny| S[Skip tool — continue reasoning]
+  P -->|allow| H[HandoffTool → specialist]
+  H --> SYN[Synthesize travel plan]
+  SYN --> COV{Coverage complete?}
+  COV -->|gaps| WARN[Warn operator]
+  COV -->|ok| FR{Final review enabled?}
+  WARN --> FR
+  FR -->|reject| REJ[PlanRejectedError]
+  FR -->|accept / disabled| OUT[Deliver plan + HITL audit]
+```
+
+Enable in interactive / production sessions:
+
+```bash
+# Approve each specialist handoff
+travel-planner --hitl
+
+# Handoffs + accept/reject the final plan
+travel-planner --hitl --hitl-final-review
+
+# Env equivalents
+# TRAVEL_PLANNER_HITL_ENABLED=true
+# TRAVEL_PLANNER_HITL_FINAL_REVIEW=true
+# TRAVEL_PLANNER_REQUIRE_HANDOFF_PERMISSION=true
+```
+
+---
+
 ## Error handling
 
 Failures are classified and surfaced without leaking stack traces to the traveler by default.
@@ -176,8 +231,8 @@ flowchart TD
 | **Input** | Control chars stripped; empty / oversized queries rejected (`ValidationError`) |
 | **Config** | Provider credentials checked before any LLM call (`ConfigurationError`) |
 | **Runtime** | BeeAI `FrameworkError` retried with Tenacity exponential backoff |
-| **Boundary** | Exhausted retries → `OrchestrationError` with structured `ErrorReport` |
-| **Observability** | Rich console + `logs/travel_planner.log`; optional `GlobalTrajectoryMiddleware` for tool traces |
+| **Boundary** | Exhausted retries → `OrchestrationError`; HITL reject → `PlanRejectedError` |
+| **Observability** | Rich console + `logs/travel_planner.log`; HITL audit on `PlanResult.metadata` |
 
 ---
 
@@ -203,12 +258,16 @@ flowchart TD
 │   ├── orchestration/
 │   │   ├── system.py              # assemble agents + resilient run
 │   │   └── react.py               # documented ReAct profiles
+│   ├── hitl/
+│   │   ├── gates.py               # AskPermission handler + final review
+│   │   └── coverage.py            # plan completeness signals
 │   ├── services/
 │   │   └── planner.py             # TravelPlannerService facade
 │   └── models/
 │       └── results.py             # PlanResult
 └── tests/
     ├── test_architecture.py       # ReAct / role contracts
+    ├── test_hitl.py               # HITL audit + coverage
     ├── test_validation_and_errors.py
     └── test_service.py            # service with mocked orchestration
 ```
@@ -255,6 +314,12 @@ Other providers work via BeeAI’s `provider:model` naming, for example:
 # Built-in Japan cultural-immersion demo
 travel-planner --demo
 
+# Production-style run with HITL handoff approvals
+travel-planner --hitl "Weekend in Lisbon — food, weather, etiquette"
+
+# HITL handoffs + final plan acceptance
+travel-planner --hitl --hitl-final-review --demo
+
 # One-shot query
 travel-planner "Weekend trip to Lisbon — food, weather, and local etiquette"
 
@@ -285,11 +350,21 @@ HandoffTool(language_culture_expert, name="LanguageCulturalGuidance", ...)
 ConditionalRequirement(ThinkTool, force_at_step=1, consecutive_allowed=False)
 ConditionalRequirement(WikipediaTool, only_after=[ThinkTool], min_invocations=1)
 
-# Optional interactive gate on expensive handoffs
-AskPermissionRequirement(["DestinationResearch", "WeatherPlanning", "LanguageCulturalGuidance"])
+# Optional interactive gate on expensive handoffs (HITL)
+AskPermissionRequirement(
+    ["DestinationResearch", "WeatherPlanning", "LanguageCulturalGuidance"],
+    handler=create_handoff_permission_handler(audit),
+    remember_choices=True,
+)
 ```
 
-Set `TRAVEL_PLANNER_REQUIRE_HANDOFF_PERMISSION=true` to enable permission prompts in interactive sessions.
+Enable with `--hitl`, `--hitl-final-review`, or:
+
+```text
+TRAVEL_PLANNER_HITL_ENABLED=true
+TRAVEL_PLANNER_HITL_FINAL_REVIEW=true
+TRAVEL_PLANNER_REQUIRE_HANDOFF_PERMISSION=true
+```
 
 ---
 
@@ -311,6 +386,8 @@ CI runs the same lint + tests on Python 3.11 and 3.12 (see `.github/workflows/ci
 | `RequirementAgent` over free-form agents | Declarative constraints → predictable tool use across LLMs |
 | Coordinator + handoffs | Clear ownership; specialists stay least-privilege |
 | Think-before-tool requirements | Explicit ReAct; fewer wasted API / Wikipedia / weather calls |
+| **HITL handoff + final review** | Human accountability for accuracy before traveler delivery |
+| Coverage heuristics | Cheap signal that a plan omitted a specialist domain |
 | Service facade + CLI | Thin UI; business flow testable without a terminal |
 | Tenacity around `FrameworkError` | Absorb transient provider / network blips |
 | pydantic-settings | 12-factor config; no hardcoded secrets |
