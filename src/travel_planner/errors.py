@@ -34,6 +34,10 @@ class OrchestrationError(TravelPlannerError):
     """Raised when multi-agent coordination fails after retries."""
 
 
+class PlanRejectedError(TravelPlannerError):
+    """Raised when a human rejects the synthesized plan at the HITL final gate."""
+
+
 @dataclass(slots=True, frozen=True)
 class ErrorReport:
     """Structured error payload suitable for CLI and logging."""
@@ -62,6 +66,8 @@ def classify_exception(exc: BaseException) -> ErrorReport:
         return ErrorReport(kind="validation", message=exc.explain(), retryable=False)
     if isinstance(exc, ConfigurationError):
         return ErrorReport(kind="configuration", message=exc.explain(), retryable=False)
+    if isinstance(exc, PlanRejectedError):
+        return ErrorReport(kind="hitl_rejected", message=exc.explain(), retryable=False)
     if isinstance(exc, OrchestrationError):
         return ErrorReport(
             kind="orchestration",

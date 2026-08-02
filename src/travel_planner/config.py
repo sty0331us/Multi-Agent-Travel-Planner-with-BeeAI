@@ -39,6 +39,22 @@ class Settings(BaseSettings):
     require_handoff_permission: bool = Field(
         default=False,
         alias="TRAVEL_PLANNER_REQUIRE_HANDOFF_PERMISSION",
+        description="HITL: ask a human before each specialist handoff.",
+    )
+    hitl_remember_choices: bool = Field(
+        default=True,
+        alias="TRAVEL_PLANNER_HITL_REMEMBER_CHOICES",
+        description="Reuse prior allow/deny decisions for the same handoff tool in a session.",
+    )
+    hitl_final_review: bool = Field(
+        default=False,
+        alias="TRAVEL_PLANNER_HITL_FINAL_REVIEW",
+        description="HITL: require human acceptance of the synthesized plan before delivery.",
+    )
+    hitl_enabled: bool = Field(
+        default=False,
+        alias="TRAVEL_PLANNER_HITL_ENABLED",
+        description="Master switch for human-in-the-loop gates (handoffs + optional final review).",
     )
     max_retries: int = Field(default=2, ge=0, le=5, alias="TRAVEL_PLANNER_MAX_RETRIES")
     retry_wait_seconds: float = Field(
@@ -78,6 +94,16 @@ class Settings(BaseSettings):
             if not self.openai_api_key:
                 missing.append("OPENAI_API_KEY")
         return missing
+
+    @property
+    def handoff_permission_enabled(self) -> bool:
+        """True when HITL should gate specialist handoffs."""
+        return self.hitl_enabled or self.require_handoff_permission
+
+    @property
+    def final_review_enabled(self) -> bool:
+        """True when HITL should gate delivery of the synthesized plan."""
+        return self.hitl_enabled and self.hitl_final_review
 
 
 @lru_cache(maxsize=1)
