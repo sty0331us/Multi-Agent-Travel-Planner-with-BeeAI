@@ -2,13 +2,11 @@
 
 Production-ready **multi-agent travel planning** system built on the [BeeAI Framework](https://framework.beeai.dev/). A **Travel Coordinator** orchestrates three specialists via `HandoffTool`, each specialist follows **ReAct** discipline with `ThinkTool` + `ConditionalRequirement`, and failures are handled with **validation, retries, and structured error reports**.
 
-> **Key learnings:** multi-agent orchestration · ReAct logics · production error handling
+> **Key Points:** multi-agent orchestration · ReAct logics · production error handling
 
 ---
 
-## Learning objectives
-
-After working through this project you will be able to:
+## objectives
 
 1. Orchestrate specialized BeeAI `RequirementAgent`s with `HandoffTool` (coordinator → specialists).
 2. Enforce **ReAct** (Reason → Act → Observe → Answer) using `ThinkTool` and `ConditionalRequirement`.
