@@ -11,17 +11,20 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 
 from travel_planner.agents.prompts import DEFAULT_DEMO_QUERY
 from travel_planner.config import PROJECT_ROOT, Settings, get_settings
 from travel_planner.errors import (
     ConfigurationError,
     OrchestrationError,
+    PlanRejectedError,
     TravelPlannerError,
     ValidationError,
     classify_exception,
 )
 from travel_planner.logging_setup import get_logger, setup_logging
+from travel_planner.models import PlanResult
 from travel_planner.services import TravelPlannerService
 
 console = Console()
@@ -45,16 +48,62 @@ def _ensure_credentials(settings: Settings) -> None:
     sys.exit(1)
 
 
-def _print_plan(answer: str, *, latency_ms: float, model: str) -> None:
+def _apply_hitl_flags(settings: Settings, args: argparse.Namespace) -> Settings:
+    """Overlay CLI HITL flags onto settings (immutable copy)."""
+    updates: dict[str, object] = {}
+    if getattr(args, "hitl", False):
+        updates["hitl_enabled"] = True
+        updates["require_handoff_permission"] = True
+    if getattr(args, "no_hitl", False):
+        updates["hitl_enabled"] = False
+        updates["require_handoff_permission"] = False
+        updates["hitl_final_review"] = False
+    if getattr(args, "hitl_final_review", False):
+        updates["hitl_enabled"] = True
+        updates["require_handoff_permission"] = True
+        updates["hitl_final_review"] = True
+    if not updates:
+        return settings
+    return settings.model_copy(update=updates)
+
+
+def _print_plan(result: PlanResult) -> None:
     console.print()
     console.print(
         Panel(
-            Markdown(answer),
+            Markdown(result.answer),
             title="Comprehensive Travel Plan",
-            subtitle=f"{model} · {latency_ms:.0f} ms",
+            subtitle=f"{result.model} · {result.latency_ms:.0f} ms",
             border_style="cyan",
         )
     )
+    coverage = result.metadata.get("coverage")
+    if isinstance(coverage, dict):
+        missing = coverage.get("missing") or []
+        if missing:
+            console.print(
+                Panel(
+                    "Coverage gaps (accuracy signal): "
+                    + ", ".join(f"[yellow]{m}[/]" for m in missing)
+                    + "\nEnable [cyan]--hitl --hitl-final-review[/] for human acceptance "
+                    "before delivering incomplete plans.",
+                    title="Plan Coverage",
+                    border_style="yellow",
+                )
+            )
+    hitl = result.metadata.get("hitl")
+    if isinstance(hitl, dict) and hitl.get("total", 0) > 0:
+        table = Table(title="HITL Audit Trail", show_lines=False)
+        table.add_column("Tool")
+        table.add_column("Allowed")
+        table.add_column("Reason")
+        for decision in hitl.get("decisions", []):
+            table.add_row(
+                str(decision.get("tool_name", "")),
+                "yes" if decision.get("allowed") else "no",
+                str(decision.get("reason", "")),
+            )
+        console.print(table)
 
 
 def _print_error(exc: BaseException) -> None:
@@ -73,7 +122,13 @@ async def run_once(query: str, settings: Settings, *, as_json: bool = False) -> 
     service = TravelPlannerService(settings)
     try:
         result = await service.plan(query)
-    except (ValidationError, ConfigurationError, OrchestrationError, TravelPlannerError) as exc:
+    except (
+        ValidationError,
+        ConfigurationError,
+        OrchestrationError,
+        PlanRejectedError,
+        TravelPlannerError,
+    ) as exc:
         _print_error(exc)
         return 1
     except Exception as exc:  # noqa: BLE001
@@ -84,15 +139,21 @@ async def run_once(query: str, settings: Settings, *, as_json: bool = False) -> 
     if as_json:
         console.print_json(json.dumps(result.as_dict()))
     else:
-        _print_plan(result.answer, latency_ms=result.latency_ms, model=result.model)
+        _print_plan(result)
     return 0
 
 
 async def interactive_loop(settings: Settings) -> int:
     """REPL loop for iterative travel planning."""
+    hitl_note = (
+        "[green]HITL on[/] — handoffs require approval"
+        if settings.handoff_permission_enabled
+        else "[dim]HITL off[/] — pass [cyan]--hitl[/] for production accuracy gates"
+    )
     console.print(
         Panel(
             "[bold]Multi-Agent Travel Planner[/] (BeeAI)\n"
+            f"{hitl_note}\n"
             "Type a travel request, or [cyan]demo[/] for the Japan sample.\n"
             "Commands: [cyan]quit[/] / [cyan]exit[/]",
             border_style="cyan",
@@ -118,8 +179,14 @@ async def interactive_loop(settings: Settings) -> int:
 
         try:
             result = await service.plan(raw)
-            _print_plan(result.answer, latency_ms=result.latency_ms, model=result.model)
-        except (ValidationError, ConfigurationError, OrchestrationError, TravelPlannerError) as exc:
+            _print_plan(result)
+        except (
+            ValidationError,
+            ConfigurationError,
+            OrchestrationError,
+            PlanRejectedError,
+            TravelPlannerError,
+        ) as exc:
             _print_error(exc)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Unhandled failure in REPL")
@@ -131,7 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="travel-planner",
         description=(
             "Production multi-agent travel planner using BeeAI RequirementAgents, "
-            "HandoffTool orchestration, ReAct (ThinkTool), and resilient error handling."
+            "HandoffTool orchestration, ReAct (ThinkTool), HITL accuracy gates, "
+            "and resilient error handling."
         ),
     )
     parser.add_argument(
@@ -150,6 +218,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit the plan result as JSON.",
     )
     parser.add_argument(
+        "--hitl",
+        action="store_true",
+        help="Enable human-in-the-loop approval before specialist handoffs.",
+    )
+    parser.add_argument(
+        "--no-hitl",
+        action="store_true",
+        help="Disable HITL gates even if enabled in .env.",
+    )
+    parser.add_argument(
+        "--hitl-final-review",
+        action="store_true",
+        help="Require human acceptance of the synthesized plan (implies --hitl).",
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         help="Override TRAVEL_PLANNER_LOG_LEVEL (DEBUG, INFO, WARNING, ERROR).",
@@ -165,6 +248,7 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    settings = _apply_hitl_flags(settings, args)
 
     setup_logging(args.log_level or settings.log_level)
     _ensure_credentials(settings)

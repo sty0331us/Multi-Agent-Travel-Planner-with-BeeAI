@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from travel_planner.config import Settings, get_settings
-from travel_planner.errors import ValidationError
+from travel_planner.errors import PlanRejectedError, ValidationError
+from travel_planner.hitl import assess_plan_coverage, confirm_final_plan
 from travel_planner.llm import create_chat_model
 from travel_planner.logging_setup import get_logger
 from travel_planner.models import PlanResult
@@ -15,7 +16,7 @@ logger = get_logger(__name__)
 
 class TravelPlannerService:
     """
-    Production facade: validate → assemble agents → orchestrate → return plan.
+    Production facade: validate → assemble agents → orchestrate → HITL → return plan.
 
     Keeps CLI / REPL thin and concentrates cross-cutting concerns here.
     """
@@ -36,6 +37,30 @@ class TravelPlannerService:
         if not validation.ok:
             raise ValidationError(validation.error or "Invalid query.")
 
-        logger.info("Planning trip for query (%d chars)", len(validation.query))
+        logger.info(
+            "Planning trip for query (%d chars) hitl=%s",
+            len(validation.query),
+            self.settings.handoff_permission_enabled,
+        )
         system = self._ensure_system()
-        return await run_travel_plan(system, validation.query)
+        result = await run_travel_plan(system, validation.query)
+
+        coverage = assess_plan_coverage(result.answer)
+        result.metadata["coverage"] = coverage.as_dict()
+        if not coverage.complete:
+            logger.warning(
+                "Plan coverage gaps detected: %s — recommend HITL final review",
+                ", ".join(coverage.missing),
+            )
+
+        if self.settings.final_review_enabled:
+            accepted = await confirm_final_plan(result.answer, system.audit_log)
+            result.metadata["hitl"] = system.audit_log.summary()
+            if not accepted:
+                raise PlanRejectedError(
+                    "Human rejected the synthesized travel plan at the HITL accuracy gate.",
+                    details={"coverage": coverage.as_dict()},
+                )
+            result.metadata["final_review_accepted"] = True
+
+        return result
