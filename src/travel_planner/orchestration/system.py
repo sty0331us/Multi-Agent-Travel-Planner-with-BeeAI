@@ -24,6 +24,7 @@ from travel_planner.agents import (
 )
 from travel_planner.config import Settings
 from travel_planner.errors import OrchestrationError, classify_exception
+from travel_planner.hitl import ApprovalAuditLog
 from travel_planner.logging_setup import get_logger
 from travel_planner.models import PlanResult
 
@@ -40,6 +41,7 @@ class TravelAgentSystem:
     language_culture_expert: RequirementAgent
     travel_coordinator: RequirementAgent
     settings: Settings
+    audit_log: ApprovalAuditLog
 
     @property
     def specialists(self) -> dict[str, RequirementAgent]:
@@ -72,8 +74,14 @@ class TravelAgentSystem:
         }
 
 
-def build_travel_system(llm: ChatModel, settings: Settings) -> TravelAgentSystem:
+def build_travel_system(
+    llm: ChatModel,
+    settings: Settings,
+    *,
+    audit_log: ApprovalAuditLog | None = None,
+) -> TravelAgentSystem:
     """Assemble specialists and the coordinator with handoff tools."""
+    audit = audit_log or ApprovalAuditLog()
     destination = build_destination_expert(llm)
     meteorologist = build_travel_meteorologist(llm)
     language = build_language_culture_expert(llm)
@@ -83,10 +91,12 @@ def build_travel_system(llm: ChatModel, settings: Settings) -> TravelAgentSystem
         travel_meteorologist=meteorologist,
         language_culture_expert=language,
         settings=settings,
+        audit_log=audit,
     )
     logger.info(
-        "Travel agent system assembled (handoff_permission=%s)",
-        settings.require_handoff_permission,
+        "Travel agent system assembled (hitl_handoffs=%s hitl_final_review=%s)",
+        settings.handoff_permission_enabled,
+        settings.final_review_enabled,
     )
     return TravelAgentSystem(
         llm=llm,
@@ -95,6 +105,7 @@ def build_travel_system(llm: ChatModel, settings: Settings) -> TravelAgentSystem
         language_culture_expert=language,
         travel_coordinator=coordinator,
         settings=settings,
+        audit_log=audit,
     )
 
 
@@ -161,7 +172,11 @@ async def run_travel_plan(
                     query=query,
                     latency_ms=latency_ms,
                     model=settings.llm_model,
-                    metadata={"attempts": attempt_n},
+                    metadata={
+                        "attempts": attempt_n,
+                        "hitl": system.audit_log.summary(),
+                        "hitl_handoffs_enabled": settings.handoff_permission_enabled,
+                    },
                 )
     except FrameworkError as exc:
         last_error = exc

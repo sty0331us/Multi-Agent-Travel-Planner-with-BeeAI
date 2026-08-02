@@ -16,6 +16,11 @@ from beeai_framework.tools.weather import OpenMeteoTool
 
 from travel_planner.agents import prompts
 from travel_planner.config import Settings
+from travel_planner.hitl import (
+    HANDOFF_TOOL_NAMES,
+    ApprovalAuditLog,
+    create_handoff_permission_handler,
+)
 
 
 def _trajectory_middleware() -> GlobalTrajectoryMiddleware:
@@ -111,12 +116,15 @@ def build_travel_coordinator(
     travel_meteorologist: RequirementAgent,
     language_culture_expert: RequirementAgent,
     settings: Settings,
+    audit_log: ApprovalAuditLog | None = None,
 ) -> RequirementAgent:
     """
     Main orchestrator agent.
 
     Uses ``HandoffTool`` instances for multi-agent orchestration and
     ``ThinkTool`` + ``ConditionalRequirement`` to enforce ReAct discipline.
+    When HITL is enabled, ``AskPermissionRequirement`` gates each specialist
+    handoff so a human can protect real-world plan accuracy.
     """
     handoff_to_destination = HandoffTool(
         destination_expert,
@@ -137,10 +145,13 @@ def build_travel_coordinator(
     requirements: list[object] = [
         ConditionalRequirement(ThinkTool, consecutive_allowed=False),
     ]
-    if settings.require_handoff_permission:
+    if settings.handoff_permission_enabled:
+        audit = audit_log or ApprovalAuditLog()
         requirements.append(
             AskPermissionRequirement(
-                ["DestinationResearch", "WeatherPlanning", "LanguageCulturalGuidance"]
+                list(HANDOFF_TOOL_NAMES),
+                handler=create_handoff_permission_handler(audit),
+                remember_choices=settings.hitl_remember_choices,
             )
         )
 
@@ -163,5 +174,6 @@ def build_travel_coordinator(
             "If the traveler does not provide a destination, ask for clarification "
             "before handing off to specialists.",
             "Prefer consulting all three specialists for multi-week cultural immersion trips.",
+            "When HITL is enabled, wait for human approval before each specialist handoff.",
         ],
     )
